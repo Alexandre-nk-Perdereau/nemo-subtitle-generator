@@ -1,0 +1,24 @@
+[project]
+name = "nemo-subtitle-generator"
+version = "0.1.0"
+description = "Subtitle generation with NVIDIA NeMo (Parakeet & Canary)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "cuda-bindings==13.1.1",
+    "gradio>=6.5.1",
+    "nemo-toolkit[asr]>=2.6.1,<2.6.2",
+    "pydub>=0.25.1",
+    "rich>=14.3.2",
+    "torch>=2.9.1,<2.10",
+    "typer>=0.21.1",
+]
+
+[project.scripts]
+gen-subtitle = "nemo_subtitle_generator.cli:main"
+gensub = "nemo_subtitle_generator.cli:main"
+gensub-gui = "nemo_subtitle_generator.gui:launch_gui"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
