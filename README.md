@@ -2,6 +2,12 @@
 
 Subtitle generation using NVIDIA NeMo ASR models (Parakeet TDT 0.6B v3, Canary 1B v2).
 
+## Prerequisites
+
+- Python >= 3.13
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- NVIDIA GPU with CUDA support
+
 ## Setup
 
 ```bash
