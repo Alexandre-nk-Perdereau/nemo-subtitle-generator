@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 import nemo.collections.asr as nemo_asr
 from pydub import AudioSegment
+from pydub.silence import detect_silence
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".flv"}
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}
@@ -28,9 +29,7 @@ def format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def build_srt(output) -> str:
-    hyp = output[0] if isinstance(output, list) and output else output
-
+def _extract_segments(hyp) -> list[dict]:
     segments = []
 
     # Word-level timestamps: max 7s or 8 words per subtitle
@@ -67,6 +66,14 @@ def build_srt(output) -> str:
                     "end": seg.get('end', 0),
                     "text": text,
                 })
+
+    return segments
+
+
+def build_srt(hypotheses: list) -> str:
+    segments = []
+    for hyp in hypotheses:
+        segments.extend(_extract_segments(hyp))
 
     if not segments:
         raise ValueError("No usable timestamps found in model output.")
@@ -113,6 +120,7 @@ class Transcriber:
                 self_attention_model="rel_pos_local_attn",
                 att_context_size=[256, 256],
             )
+            self.model.change_subsampling_conv_chunking_factor(1)
 
         self.model = self.model.to(self.device)
         self.model.eval()
@@ -171,15 +179,112 @@ class Transcriber:
         if self.model_type == ModelType.CANARY:
             self._resolve_canary_langs(source_lang, target_lang)
 
+    def _split_audio(
+        self,
+        audio: AudioSegment,
+        chunk_max_minutes: int,
+        chunk_silence_window_s: int,
+    ) -> list[tuple[AudioSegment, float]]:
+        max_ms = chunk_max_minutes * 60 * 1000
+        if len(audio) <= max_ms:
+            return [(audio, 0.0)]
+
+        window_ms = chunk_silence_window_s * 1000
+        chunks: list[tuple[AudioSegment, float]] = []
+        pos = 0
+
+        while pos < len(audio):
+            end = pos + max_ms
+            if end >= len(audio):
+                chunks.append((audio[pos:], pos / 1000.0))
+                break
+
+            search_start = max(pos, end - window_ms)
+            search_end = min(len(audio), end + window_ms)
+            search_region = audio[search_start:search_end]
+
+            silences = detect_silence(search_region, min_silence_len=300, silence_thresh=-40)
+
+            if silences:
+                target_in_region = end - search_start
+                best_silence = min(
+                    silences,
+                    key=lambda s: abs((s[0] + s[1]) / 2 - target_in_region),
+                )
+                cut_in_region = (best_silence[0] + best_silence[1]) // 2
+                cut = search_start + cut_in_region
+            else:
+                cut = end
+
+            chunks.append((audio[pos:cut], pos / 1000.0))
+            pos = cut
+
+        return chunks
+
+    def _offset_timestamps(self, hyp, offset_s: float):
+        if offset_s == 0.0 or not hasattr(hyp, 'timestamp') or not hyp.timestamp:
+            return
+        for level in ('word', 'segment', 'char'):
+            entries = hyp.timestamp.get(level, [])
+            for entry in entries:
+                if 'start' in entry:
+                    entry['start'] += offset_s
+                if 'end' in entry:
+                    entry['end'] += offset_s
+
+    def _transcribe_chunks(
+        self,
+        audio_path: Path,
+        timestamps: bool,
+        chunking: bool,
+        chunk_max_minutes: int,
+        chunk_silence_window_s: int,
+        **model_kwargs,
+    ):
+        if chunking and chunk_max_minutes <= 0:
+            raise ValueError("chunk_max_minutes must be > 0 when chunking is enabled.")
+
+        audio = AudioSegment.from_file(str(audio_path))
+        audio = audio.set_frame_rate(16000).set_channels(1)
+
+        if not chunking:
+            split = [(audio, 0.0)]
+        else:
+            split = self._split_audio(audio, chunk_max_minutes, chunk_silence_window_s)
+
+        all_hypotheses = []
+        for chunk_audio, offset_s in split:
+            fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            try:
+                chunk_audio.export(tmp_path, format="wav")
+                result = self.model.transcribe(
+                    [tmp_path],
+                    timestamps=timestamps,
+                    **model_kwargs,
+                )
+                hyp = result[0] if isinstance(result, list) else result
+                self._offset_timestamps(hyp, offset_s)
+                all_hypotheses.append(hyp)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+        return all_hypotheses
+
     def transcribe(
         self,
         file_path: str | Path,
         source_lang: str = "auto",
         target_lang: str | None = None,
+        chunking: bool = True,
+        chunk_max_minutes: int = 20,
+        chunk_silence_window_s: int = 5,
     ) -> str:
-        canary_langs: tuple[str, str] | None = None
+        model_kwargs: dict = {}
         if self.model_type == ModelType.CANARY:
-            canary_langs = self._resolve_canary_langs(source_lang, target_lang)
+            src, target = self._resolve_canary_langs(source_lang, target_lang)
+            model_kwargs.update(source_lang=src, target_lang=target)
 
         file_path = Path(file_path)
         if not file_path.exists():
@@ -189,21 +294,20 @@ class Transcriber:
         audio_path, temp_audio = self._prepare_audio(file_path)
 
         try:
-            if self.model_type == ModelType.CANARY:
-                src, target = canary_langs if canary_langs is not None else (source_lang, target_lang or source_lang)
-                result = self.model.transcribe(
-                    [str(audio_path)],
-                    source_lang=src,
-                    target_lang=target,
-                )
-            else:
-                result = self.model.transcribe([str(audio_path)])
-
-            if isinstance(result, list):
-                result = result[0] if result else ""
-            if hasattr(result, 'text'):
-                result = result.text
-            return str(result)
+            hypotheses = self._transcribe_chunks(
+                audio_path,
+                timestamps=False,
+                chunking=chunking,
+                chunk_max_minutes=chunk_max_minutes,
+                chunk_silence_window_s=chunk_silence_window_s,
+                **model_kwargs,
+            )
+            texts = []
+            for hyp in hypotheses:
+                text = hyp.text if hasattr(hyp, 'text') else str(hyp)
+                if text:
+                    texts.append(text)
+            return " ".join(texts)
         except torch.cuda.OutOfMemoryError:
             self.unload_model()
             raise
@@ -217,10 +321,14 @@ class Transcriber:
         output_path: str | Path | None = None,
         source_lang: str = "auto",
         target_lang: str | None = None,
+        chunking: bool = True,
+        chunk_max_minutes: int = 20,
+        chunk_silence_window_s: int = 5,
     ) -> Path:
-        canary_langs: tuple[str, str] | None = None
+        model_kwargs: dict = {}
         if self.model_type == ModelType.CANARY:
-            canary_langs = self._resolve_canary_langs(source_lang, target_lang)
+            src, target = self._resolve_canary_langs(source_lang, target_lang)
+            model_kwargs.update(source_lang=src, target_lang=target)
 
         file_path = Path(file_path)
         if not file_path.exists():
@@ -236,21 +344,16 @@ class Transcriber:
         audio_path, temp_audio = self._prepare_audio(file_path)
 
         try:
-            if self.model_type == ModelType.CANARY:
-                src, target = canary_langs if canary_langs is not None else (source_lang, target_lang or source_lang)
-                output = self.model.transcribe(
-                    [str(audio_path)],
-                    source_lang=src,
-                    target_lang=target,
-                    timestamps=True,
-                )
-            else:
-                output = self.model.transcribe(
-                    [str(audio_path)],
-                    timestamps=True,
-                )
+            hypotheses = self._transcribe_chunks(
+                audio_path,
+                timestamps=True,
+                chunking=chunking,
+                chunk_max_minutes=chunk_max_minutes,
+                chunk_silence_window_s=chunk_silence_window_s,
+                **model_kwargs,
+            )
 
-            srt_content = build_srt(output)
+            srt_content = build_srt(hypotheses)
 
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(srt_content)

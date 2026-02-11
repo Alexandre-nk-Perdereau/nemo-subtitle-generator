@@ -62,10 +62,25 @@ def transcribe(
         bool,
         typer.Option("--local-attention", help="Use local attention for long files (Parakeet, reduces VRAM)"),
     ] = False,
+    no_chunking: Annotated[
+        bool,
+        typer.Option("--no-chunking", help="Disable automatic audio chunking"),
+    ] = False,
+    chunk_minutes: Annotated[
+        int,
+        typer.Option("--chunk-minutes", min=1, help="Max chunk duration in minutes"),
+    ] = 20,
+    chunk_window: Annotated[
+        int,
+        typer.Option("--chunk-window", help="Silence search window in seconds around cut points"),
+    ] = 5,
 ) -> None:
     """Transcribe an audio or video file to SRT subtitles."""
     if not file.exists():
         console.print(f"[red]Error: file not found: {file}[/red]")
+        raise typer.Exit(1)
+    if chunk_minutes <= 0:
+        console.print("[red]Error: --chunk-minutes must be > 0[/red]")
         raise typer.Exit(1)
 
     try:
@@ -106,6 +121,9 @@ def transcribe(
                 file,
                 source_lang=source_lang,
                 target_lang=target_lang,
+                chunking=not no_chunking,
+                chunk_max_minutes=chunk_minutes,
+                chunk_silence_window_s=chunk_window,
             )
 
         console.print("\n[bold]Transcription:[/bold]")
@@ -122,6 +140,9 @@ def transcribe(
                 output_path=output,
                 source_lang=source_lang,
                 target_lang=target_lang,
+                chunking=not no_chunking,
+                chunk_max_minutes=chunk_minutes,
+                chunk_silence_window_s=chunk_window,
             )
 
         console.print(f"\n[green]OK[/green] Subtitles saved: [bold]{srt_path}[/bold]")
@@ -154,10 +175,25 @@ def batch(
         bool,
         typer.Option("--local-attention", help="Use local attention for long files (Parakeet, reduces VRAM)"),
     ] = False,
+    no_chunking: Annotated[
+        bool,
+        typer.Option("--no-chunking", help="Disable automatic audio chunking"),
+    ] = False,
+    chunk_minutes: Annotated[
+        int,
+        typer.Option("--chunk-minutes", min=1, help="Max chunk duration in minutes"),
+    ] = 20,
+    chunk_window: Annotated[
+        int,
+        typer.Option("--chunk-window", help="Silence search window in seconds around cut points"),
+    ] = 5,
 ) -> None:
     """Transcribe all audio/video files in a directory recursively."""
     if not directory.exists():
         console.print(f"[red]Error: directory not found: {directory}[/red]")
+        raise typer.Exit(1)
+    if chunk_minutes <= 0:
+        console.print("[red]Error: --chunk-minutes must be > 0[/red]")
         raise typer.Exit(1)
 
     if not directory.is_dir():
@@ -238,6 +274,9 @@ def batch(
                     output_path=output_path,
                     source_lang=source_lang,
                     target_lang=target_lang,
+                    chunking=not no_chunking,
+                    chunk_max_minutes=chunk_minutes,
+                    chunk_silence_window_s=chunk_window,
                 )
             console.print(f"  [green]OK[/green] {output_path.name}")
             success_count += 1

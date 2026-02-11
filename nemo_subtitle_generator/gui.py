@@ -39,6 +39,9 @@ def transcribe_file(
     target_lang: str | None,
     output_format: str,
     local_attention: bool,
+    chunking: bool,
+    chunk_max_minutes: int,
+    chunk_silence_window_s: int,
 ):
     if file is None:
         return "Please select a file.", None
@@ -54,6 +57,9 @@ def transcribe_file(
                 file_path,
                 source_lang=source_lang,
                 target_lang=target,
+                chunking=chunking,
+                chunk_max_minutes=int(chunk_max_minutes),
+                chunk_silence_window_s=int(chunk_silence_window_s),
             )
             return text, None
 
@@ -68,6 +74,9 @@ def transcribe_file(
                 output_path=temp_path,
                 source_lang=source_lang,
                 target_lang=target,
+                chunking=chunking,
+                chunk_max_minutes=int(chunk_max_minutes),
+                chunk_silence_window_s=int(chunk_silence_window_s),
             )
             with open(srt_path, "r", encoding="utf-8") as f:
                 srt_content = f.read()
@@ -88,6 +97,9 @@ def transcribe_batch(
     target_lang: str | None,
     max_depth: int,
     local_attention: bool,
+    chunking: bool,
+    chunk_max_minutes: int,
+    chunk_silence_window_s: int,
     progress=gr.Progress(),
 ):
     if not directory:
@@ -150,6 +162,9 @@ def transcribe_batch(
                 output_path=output_path,
                 source_lang=source_lang,
                 target_lang=target,
+                chunking=chunking,
+                chunk_max_minutes=int(chunk_max_minutes),
+                chunk_silence_window_s=int(chunk_silence_window_s),
             )
             results.append(f"[ok] {file.name} -> {output_path.name}")
             success_count += 1
@@ -222,6 +237,26 @@ def create_interface() -> gr.Blocks:
                             value=False,
                         )
 
+                        chunking_enabled = gr.Checkbox(
+                            label="Audio chunking (split long audio before transcription)",
+                            value=True,
+                        )
+                        with gr.Row():
+                            chunk_max_min = gr.Slider(
+                                minimum=5,
+                                maximum=60,
+                                value=20,
+                                step=5,
+                                label="Chunk max duration (min)",
+                            )
+                            chunk_window = gr.Slider(
+                                minimum=1,
+                                maximum=15,
+                                value=5,
+                                step=1,
+                                label="Silence search window (s)",
+                            )
+
                         transcribe_btn = gr.Button("Transcribe", variant="primary")
 
                     with gr.Column(scale=1):
@@ -230,7 +265,7 @@ def create_interface() -> gr.Blocks:
 
                 transcribe_btn.click(
                     fn=transcribe_file,
-                    inputs=[file_input, model_dropdown, source_lang, target_lang, output_format, local_attn],
+                    inputs=[file_input, model_dropdown, source_lang, target_lang, output_format, local_attn, chunking_enabled, chunk_max_min, chunk_window],
                     outputs=[output_text, download_file],
                 )
 
@@ -284,6 +319,26 @@ def create_interface() -> gr.Blocks:
                             value=False,
                         )
 
+                        batch_chunking = gr.Checkbox(
+                            label="Audio chunking (split long audio before transcription)",
+                            value=True,
+                        )
+                        with gr.Row():
+                            batch_chunk_max_min = gr.Slider(
+                                minimum=5,
+                                maximum=60,
+                                value=20,
+                                step=5,
+                                label="Chunk max duration (min)",
+                            )
+                            batch_chunk_window = gr.Slider(
+                                minimum=1,
+                                maximum=15,
+                                value=5,
+                                step=1,
+                                label="Silence search window (s)",
+                            )
+
                         batch_btn = gr.Button("Start batch", variant="primary")
 
                     with gr.Column(scale=1):
@@ -291,7 +346,7 @@ def create_interface() -> gr.Blocks:
 
                 batch_btn.click(
                     fn=transcribe_batch,
-                    inputs=[dir_input, batch_model, batch_source_lang, batch_target_lang, batch_max_depth, batch_local_attn],
+                    inputs=[dir_input, batch_model, batch_source_lang, batch_target_lang, batch_max_depth, batch_local_attn, batch_chunking, batch_chunk_max_min, batch_chunk_window],
                     outputs=[batch_output],
                 )
 
