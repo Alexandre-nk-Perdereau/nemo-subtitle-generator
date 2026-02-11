@@ -234,7 +234,7 @@ def create_interface() -> gr.Blocks:
 
                         local_attn = gr.Checkbox(
                             label="Local attention (for long files, reduces VRAM)",
-                            value=False,
+                            value=True,
                         )
 
                         chunking_enabled = gr.Checkbox(
@@ -316,7 +316,7 @@ def create_interface() -> gr.Blocks:
 
                         batch_local_attn = gr.Checkbox(
                             label="Local attention (for long files, reduces VRAM)",
-                            value=False,
+                            value=True,
                         )
 
                         batch_chunking = gr.Checkbox(
