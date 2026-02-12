@@ -29,36 +29,71 @@ def format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
+MAX_SUBTITLE_DURATION = 7.0
+MAX_SUBTITLE_WORDS = 20
+
+
+def _split_long_segment(seg_text: str, words: list[dict], seg_start: float, seg_end: float) -> list[dict]:
+    """Split a segment that is too long using word timestamps, preferring punctuation breaks."""
+    seg_words = [w for w in words if w['start'] >= seg_start - 0.05 and w['end'] <= seg_end + 0.05]
+    if not seg_words:
+        return [{"start": seg_start, "end": seg_end, "text": seg_text}]
+
+    subtitles = []
+    current_words = []
+    current_start = seg_words[0]['start']
+
+    for i, w in enumerate(seg_words):
+        if not current_words:
+            current_start = w['start']
+        current_words.append(w)
+
+        is_last = i == len(seg_words) - 1
+        duration = w['end'] - current_start
+        word_text = w['word'].rstrip()
+        at_comma = word_text.endswith(',')
+        too_long = duration > MAX_SUBTITLE_DURATION
+        too_many = len(current_words) >= MAX_SUBTITLE_WORDS
+
+        if is_last or too_long or too_many or (at_comma and (duration > 3.0 or len(current_words) >= 6)):
+            subtitles.append({
+                "start": current_start,
+                "end": w['end'],
+                "text": " ".join(cw['word'] for cw in current_words),
+            })
+            current_words = []
+
+    return subtitles
+
+
 def _extract_segments(hyp) -> list[dict]:
-    segments = []
+    if not hasattr(hyp, 'timestamp') or not hyp.timestamp:
+        return []
 
-    # Word-level timestamps: max 7s or 8 words per subtitle
-    if hasattr(hyp, 'timestamp') and hyp.timestamp:
-        words = hyp.timestamp.get('word', [])
-        if words:
-            current_segment = []
-            current_start = 0.0
+    words = hyp.timestamp.get('word', [])
+    model_segments = hyp.timestamp.get('segment', [])
 
-            for i, w in enumerate(words):
-                if not current_segment:
-                    current_start = w['start']
-                current_segment.append(w['word'])
+    if model_segments and words:
+        subtitles = []
+        for seg in model_segments:
+            text = seg.get('segment', '').strip()
+            if not text:
+                continue
+            start = seg.get('start', 0)
+            end = seg.get('end', 0)
+            duration = end - start
+            word_count = len(text.split())
 
-                is_last = i == len(words) - 1
-                too_long = w['end'] - current_start > 7
-                too_many = len(current_segment) >= 8
+            if duration <= MAX_SUBTITLE_DURATION and word_count <= MAX_SUBTITLE_WORDS:
+                subtitles.append({"start": start, "end": end, "text": text})
+            else:
+                subtitles.extend(_split_long_segment(text, words, start, end))
+        return subtitles
 
-                if is_last or too_long or too_many:
-                    segments.append({
-                        "start": current_start,
-                        "end": w['end'],
-                        "text": " ".join(current_segment),
-                    })
-                    current_segment = []
-
-    # Fallback: segment-level timestamps
-    if not segments and hasattr(hyp, 'timestamp') and hyp.timestamp:
-        for seg in hyp.timestamp.get('segment', []):
+    # Fallback: segment-level only (no word timestamps available)
+    if model_segments:
+        segments = []
+        for seg in model_segments:
             text = seg.get('segment', '').strip()
             if text:
                 segments.append({
@@ -66,8 +101,44 @@ def _extract_segments(hyp) -> list[dict]:
                     "end": seg.get('end', 0),
                     "text": text,
                 })
+        return segments
 
-    return segments
+    # Last resort: word-level with punctuation awareness
+    if words:
+        subtitles = []
+        current_words = []
+        current_start = 0.0
+        for i, w in enumerate(words):
+            if not current_words:
+                current_start = w['start']
+            current_words.append(w)
+
+            is_last = i == len(words) - 1
+            duration = w['end'] - current_start
+            word_text = w['word'].rstrip()
+            ends_sentence = word_text.endswith(('.', '?', '!'))
+            at_comma = word_text.endswith(',')
+            has_pause = (i + 1 < len(words) and words[i + 1]['start'] - w['end'] > 0.5)
+
+            should_split = (
+                is_last
+                or ends_sentence
+                or duration > MAX_SUBTITLE_DURATION
+                or len(current_words) >= MAX_SUBTITLE_WORDS
+                or has_pause
+                or (at_comma and (duration > 3.0 or len(current_words) >= 6))
+            )
+
+            if should_split:
+                subtitles.append({
+                    "start": current_start,
+                    "end": w['end'],
+                    "text": " ".join(cw['word'] for cw in current_words),
+                })
+                current_words = []
+        return subtitles
+
+    return []
 
 
 def build_srt(hypotheses: list) -> str:
